@@ -45,6 +45,12 @@ APU_PULSE2_CTRL = $4004   ; Pulse 2 duty, volume, envelope
 APU_PULSE2_SWEEP = $4005  ; Pulse 2 sweep control
 APU_PULSE2_LO = $4006     ; Pulse 2 timer low
 APU_PULSE2_HI = $4007     ; Pulse 2 timer high, length counter
+APU_TRI_CTRL = $4008      ; Triangle linear counter
+APU_TRI_LO = $400A        ; Triangle timer low
+APU_TRI_HI = $400B        ; Triangle timer high, length counter
+APU_NOISE_CTRL = $400C    ; Noise volume/envelope
+APU_NOISE_LO = $400E      ; Noise period and mode
+APU_NOISE_HI = $400F      ; Noise length counter
 APU_STATUS = $4015        ; APU status (enable channels)
 
 ;=============================================================================
@@ -131,11 +137,19 @@ spawn_timer:    .res 1    ; Frames until next dollar spawn
 sfx_timer:      .res 1    ; Frames remaining for current sound effect
 sfx_type:       .res 1    ; 0=none, 1=collect, 2=jump
 
-; Music state
-music_ptr:      .res 2    ; Pointer to current position in music data
-music_timer:    .res 1    ; Frames until next note
+; Music state - Melody (Pulse 2)
+music_ptr:      .res 2    ; Pointer to current position in melody data
+music_timer:    .res 1    ; Frames until next melody note
 music_playing:  .res 1    ; 0=stopped, 1=playing
 music_loop:     .res 1    ; 0=play once, 1=loop
+
+; Music state - Bass (Triangle)
+bass_ptr:       .res 2    ; Pointer to current position in bass data
+bass_timer:     .res 1    ; Frames until next bass note
+
+; Music state - Drums (Noise)
+drum_ptr:       .res 2    ; Pointer to current position in drum data
+drum_timer:     .res 1    ; Frames until next drum hit
 
 ;=============================================================================
 ; OAM Buffer (Sprite RAM - must be at $0200)
@@ -190,8 +204,8 @@ reset:
     inx
     bne @clear_oam
 
-    ; Initialize APU - enable pulse channels 1 and 2
-    lda #$03              ; Enable pulse 1 and pulse 2
+    ; Initialize APU - enable pulse 1, pulse 2, triangle, and noise
+    lda #$0F              ; Enable pulse 1, pulse 2, triangle, noise
     sta APU_STATUS
     lda #$00
     sta sfx_timer         ; No sound playing initially
@@ -1005,11 +1019,12 @@ update_sound:
     rts
 
 ;-----------------------------------------------------------------------------
-; Music Engine - Background music on Pulse Channel 2
+; Music Engine - 3-Channel: Melody (Pulse 2), Bass (Triangle), Drums (Noise)
 ;-----------------------------------------------------------------------------
 
-; Start playing the jungle theme (loops)
+; Start playing the jungle theme (loops) - all 3 channels
 start_music:
+    ; Initialize melody (Pulse 2)
     lda #<jungle_melody
     sta music_ptr
     lda #>jungle_melody
@@ -1019,14 +1034,38 @@ start_music:
     sta music_playing
     sta music_loop        ; Enable looping
     
-    ; Set up pulse 2 for music - 50% duty, volume 3
-    lda #%10110011        ; Duty 50% (10), halt (1), const vol (1), vol=3
+    ; Set up pulse 2 for melody - 50% duty, volume 2
+    lda #%10110010        ; Duty 50% (10), halt (1), const vol (1), vol=2
     sta APU_PULSE2_CTRL
     lda #$00
     sta APU_PULSE2_SWEEP  ; No sweep
+    
+    ; Initialize bass (Triangle)
+    lda #<jungle_bass
+    sta bass_ptr
+    lda #>jungle_bass
+    sta bass_ptr+1
+    lda #1
+    sta bass_timer
+    
+    ; Set up triangle - linear counter for sustain
+    lda #%11111111        ; Halt flag + max linear counter (sustain)
+    sta APU_TRI_CTRL
+    
+    ; Initialize drums (Noise)
+    lda #<jungle_drums
+    sta drum_ptr
+    lda #>jungle_drums
+    sta drum_ptr+1
+    lda #1
+    sta drum_timer
+    
+    ; Set up noise channel
+    lda #%00111100        ; Halt (0), constant vol (0), vol=12
+    sta APU_NOISE_CTRL
     rts
 
-; Start title screen jingle (plays once)
+; Start title screen jingle (plays once) - melody only
 start_title_jingle:
     lda #<title_jingle
     sta music_ptr
@@ -1039,6 +1078,15 @@ start_title_jingle:
     lda #0
     sta music_loop        ; Don't loop
     
+    ; Silence bass and drums for jingles
+    lda #$00
+    sta bass_timer
+    sta drum_timer
+    lda #%10000000        ; Silence triangle
+    sta APU_TRI_CTRL
+    lda #%00110000        ; Silence noise
+    sta APU_NOISE_CTRL
+    
     ; Set up pulse 2 - brighter sound for title, volume 5
     lda #%01110101        ; Duty 25% (01), halt (1), const vol (1), vol=5
     sta APU_PULSE2_CTRL
@@ -1046,7 +1094,7 @@ start_title_jingle:
     sta APU_PULSE2_SWEEP
     rts
 
-; Start game over jingle (plays once)
+; Start game over jingle (plays once) - melody only
 start_gameover_jingle:
     lda #<gameover_jingle
     sta music_ptr
@@ -1059,6 +1107,15 @@ start_gameover_jingle:
     lda #0
     sta music_loop        ; Don't loop
     
+    ; Silence bass and drums for jingles
+    lda #$00
+    sta bass_timer
+    sta drum_timer
+    lda #%10000000        ; Silence triangle
+    sta APU_TRI_CTRL
+    lda #%00110000        ; Silence noise
+    sta APU_NOISE_CTRL
+    
     ; Set up pulse 2 - sadder tone, volume 4
     lda #%10110100        ; Duty 50% (10), halt (1), const vol (1), vol=4
     sta APU_PULSE2_CTRL
@@ -1066,32 +1123,52 @@ start_gameover_jingle:
     sta APU_PULSE2_SWEEP
     rts
 
-; Stop music
+; Stop music - silence all channels
 stop_music:
     lda #$00
     sta music_playing
-    lda #%00110000        ; Silence channel
+    sta bass_timer
+    sta drum_timer
+    lda #%00110000        ; Silence pulse 2
     sta APU_PULSE2_CTRL
+    lda #%10000000        ; Silence triangle
+    sta APU_TRI_CTRL
+    lda #%00110000        ; Silence noise
+    sta APU_NOISE_CTRL
     rts
 
-; Update music (called each frame)
+; Update music (called each frame) - updates all 3 channels
 update_music:
     lda music_playing
-    beq @music_done       ; Music not playing
+    beq @all_done         ; Music not playing
     
+    ; === Update Melody (Pulse 2) ===
+    jsr update_melody
+    
+    ; === Update Bass (Triangle) ===
+    jsr update_bass
+    
+    ; === Update Drums (Noise) ===
+    jsr update_drums
+    
+@all_done:
+    rts
+
+;--- Update Melody Channel (Pulse 2) ---
+update_melody:
     dec music_timer
-    bne @music_done       ; Not time for next note yet
+    bne @melody_done      ; Not time for next note yet
     
     ; Time for next note - read from music data
     ldy #0
     lda (music_ptr), y    ; Get note duration
-    beq @loop_music       ; 0 = end of song, loop
+    beq @loop_melody      ; 0 = end of song, loop
     sta music_timer       ; Set duration
     
     iny
     lda (music_ptr), y    ; Get note pitch (timer low)
     cmp #$FF              ; $FF = rest
-    beq @play_rest
+    beq @melody_rest
     sta APU_PULSE2_LO
     
     iny  
@@ -1099,61 +1176,186 @@ update_music:
     sta APU_PULSE2_HI
     
     ; Re-enable sound (in case we were resting)
-    lda #%10110011        ; Duty 50% (10), halt (1), const vol (1), vol=3
+    lda #%10110010        ; Duty 50% (10), halt (1), const vol (1), vol=2
     sta APU_PULSE2_CTRL
-    jmp @advance_ptr
+    jmp @advance_melody
     
-@play_rest:
+@melody_rest:
     ; Silence for rest
     lda #%00110000
     sta APU_PULSE2_CTRL
     
-@advance_ptr:
+@advance_melody:
     ; Advance pointer by 3 bytes (duration, pitch_lo, pitch_hi)
     lda music_ptr
     clc
     adc #3
     sta music_ptr
-    bcc @music_done
+    bcc @melody_done
     inc music_ptr+1
     
-@music_done:
+@melody_done:
     rts
     
-@loop_music:
+@loop_melody:
     ; Check if we should loop
     lda music_loop
     beq @end_jingle       ; Don't loop - just stop
     
-    ; Reset to beginning of song
+    ; Reset all channels to beginning
     lda #<jungle_melody
     sta music_ptr
     lda #>jungle_melody
     sta music_ptr+1
+    lda #<jungle_bass
+    sta bass_ptr
+    lda #>jungle_bass
+    sta bass_ptr+1
+    lda #<jungle_drums
+    sta drum_ptr
+    lda #>jungle_drums
+    sta drum_ptr+1
     lda #1
     sta music_timer
+    sta bass_timer
+    sta drum_timer
     rts
     
 @end_jingle:
     ; Jingle finished - stop playing
     lda #0
     sta music_playing
-    lda #%00110000        ; Silence channel
+    lda #%00110000        ; Silence pulse 2
     sta APU_PULSE2_CTRL
     rts
 
+;--- Update Bass Channel (Triangle) ---
+update_bass:
+    lda bass_timer
+    beq @bass_done        ; Bass not active
+    
+    dec bass_timer
+    bne @bass_done        ; Not time for next note yet
+    
+    ; Time for next bass note
+    ldy #0
+    lda (bass_ptr), y     ; Get note duration
+    beq @bass_end         ; 0 = end of bass pattern
+    sta bass_timer        ; Set duration
+    
+    iny
+    lda (bass_ptr), y     ; Get note pitch (timer low)
+    cmp #$FF              ; $FF = rest
+    beq @bass_rest
+    sta APU_TRI_LO
+    
+    iny  
+    lda (bass_ptr), y     ; Get timer high
+    sta APU_TRI_HI
+    
+    ; Enable triangle
+    lda #%11111111        ; Max linear counter (sustain)
+    sta APU_TRI_CTRL
+    jmp @advance_bass
+    
+@bass_rest:
+    ; Silence triangle for rest
+    lda #%10000000        ; Halt, counter = 0
+    sta APU_TRI_CTRL
+    
+@advance_bass:
+    ; Advance pointer by 3 bytes
+    lda bass_ptr
+    clc
+    adc #3
+    sta bass_ptr
+    bcc @bass_done
+    inc bass_ptr+1
+    
+@bass_done:
+    rts
+    
+@bass_end:
+    ; Bass pattern ended - will be reset when melody loops
+    lda #0
+    sta bass_timer
+    lda #%10000000
+    sta APU_TRI_CTRL
+    rts
+
+;--- Update Drums Channel (Noise) ---
+update_drums:
+    lda drum_timer
+    beq @drum_done        ; Drums not active
+    
+    dec drum_timer
+    bne @drum_done        ; Not time for next hit yet
+    
+    ; Time for next drum hit
+    ldy #0
+    lda (drum_ptr), y     ; Get duration
+    beq @drum_end         ; 0 = end of drum pattern
+    sta drum_timer        ; Set duration
+    
+    iny
+    lda (drum_ptr), y     ; Get drum type/volume
+    cmp #$FF              ; $FF = rest
+    beq @drum_rest
+    sta APU_NOISE_CTRL    ; Volume and envelope
+    
+    iny  
+    lda (drum_ptr), y     ; Get noise period (pitch)
+    sta APU_NOISE_LO
+    
+    ; Trigger the noise
+    lda #%11111000        ; Length counter load
+    sta APU_NOISE_HI
+    jmp @advance_drum
+    
+@drum_rest:
+    ; Silence drums for rest
+    lda #%00110000
+    sta APU_NOISE_CTRL
+    
+@advance_drum:
+    ; Advance pointer by 3 bytes
+    lda drum_ptr
+    clc
+    adc #3
+    sta drum_ptr
+    bcc @drum_done
+    inc drum_ptr+1
+    
+@drum_done:
+    rts
+    
+@drum_end:
+    ; Drum pattern ended - will be reset when melody loops
+    lda #0
+    sta drum_timer
+    lda #%00110000
+    sta APU_NOISE_CTRL
+    rts
+
 ;-----------------------------------------------------------------------------
-; Jungle Action Melody Data
+; Jungle Action Melody Data - Extended Version with Progression
 ; Format: duration (frames), timer_lo, timer_hi (0 = end)
 ; Timer values: lower = higher pitch
 ;-----------------------------------------------------------------------------
 ; Note timer values (approximate):
+; C3=855/$357  D3=762/$2FA  E3=679/$2A7  F3=640/$280  G3=570/$23A
+; A3=508/$1FC  B3=453/$1C5  
 ; C4=428/$1AC  D4=381/$17D  E4=339/$153  F4=320/$140  G4=285/$11D
 ; A4=254/$0FE  B4=226/$0E2  C5=214/$0D6  D5=190/$0BE  E5=170/$0AA
 ; F5=160/$0A0  G5=142/$08E  A5=127/$07F  B5=113/$071  C6=107/$06B
+; D6=95/$05F   E6=85/$055
 
 jungle_melody:
-    ; Intro riff - driving jungle beat (E minor pentatonic)
+    ;=========================================================================
+    ; SECTION A - Intro Theme (E minor, driving rhythm)
+    ; Establishes the main motif
+    ;=========================================================================
+    ; Measure 1-2: Main hook
     .byte 8,   $53, $09    ; E4 - quick
     .byte 8,   $53, $09    ; E4
     .byte 8,   $1D, $09    ; G4
@@ -1161,8 +1363,22 @@ jungle_melody:
     .byte 12,  $FE, $08    ; A4 - slightly longer
     .byte 8,   $1D, $09    ; G4
     .byte 16,  $53, $09    ; E4 - hold
+    .byte 8,   $FF, $00    ; Rest
     
-    ; Second phrase - climb up
+    ; Measure 3-4: Repeat with variation
+    .byte 8,   $53, $09    ; E4
+    .byte 8,   $1D, $09    ; G4
+    .byte 8,   $53, $09    ; E4
+    .byte 8,   $1D, $09    ; G4
+    .byte 12,  $E2, $08    ; B4 - go higher this time
+    .byte 8,   $FE, $08    ; A4
+    .byte 16,  $1D, $09    ; G4 - hold
+    .byte 8,   $FF, $00    ; Rest
+    
+    ;=========================================================================
+    ; SECTION A' - Variation with climb
+    ;=========================================================================
+    ; Measure 5-6: Building energy
     .byte 8,   $1D, $09    ; G4
     .byte 8,   $1D, $09    ; G4  
     .byte 8,   $FE, $08    ; A4
@@ -1170,30 +1386,204 @@ jungle_melody:
     .byte 12,  $E2, $08    ; B4
     .byte 8,   $FE, $08    ; A4
     .byte 16,  $1D, $09    ; G4 - hold
+    .byte 8,   $FF, $00    ; Rest
     
-    ; Third phrase - higher energy
-    .byte 6,   $E2, $08    ; B4 - faster
+    ; Measure 7-8: Peak of A section
+    .byte 6,   $E2, $08    ; B4 - faster rhythm
     .byte 6,   $E2, $08    ; B4
     .byte 6,   $D6, $08    ; C5
     .byte 6,   $E2, $08    ; B4
     .byte 10,  $FE, $08    ; A4
     .byte 10,  $1D, $09    ; G4
     .byte 20,  $53, $09    ; E4 - long hold
+    .byte 12,  $FF, $00    ; Rest - breath
     
-    ; Rest before loop
+    ;=========================================================================
+    ; SECTION B - Development (G major feel, brighter)
+    ; Contrasting section with new melodic material
+    ;=========================================================================
+    ; Measure 9-10: New theme - ascending
+    .byte 10,  $1D, $09    ; G4
+    .byte 10,  $FE, $08    ; A4
+    .byte 10,  $E2, $08    ; B4
+    .byte 14,  $D6, $08    ; C5 - hold
+    .byte 8,   $FF, $00    ; Rest
+    .byte 10,  $E2, $08    ; B4
+    .byte 10,  $D6, $08    ; C5
+    .byte 14,  $BE, $08    ; D5 - higher!
+    .byte 8,   $FF, $00    ; Rest
+    
+    ; Measure 11-12: Descending answer
+    .byte 10,  $BE, $08    ; D5
+    .byte 10,  $D6, $08    ; C5
+    .byte 10,  $E2, $08    ; B4
+    .byte 14,  $FE, $08    ; A4
+    .byte 8,   $FF, $00    ; Rest
+    .byte 10,  $FE, $08    ; A4
+    .byte 10,  $1D, $09    ; G4
+    .byte 14,  $53, $09    ; E4
     .byte 12,  $FF, $00    ; Rest
     
-    ; Syncopated rhythm section
-    .byte 6,   $53, $09    ; E4
+    ; Measure 13-14: Playful syncopation
+    .byte 6,   $1D, $09    ; G4
     .byte 10,  $FF, $00    ; Rest  
+    .byte 6,   $1D, $09    ; G4
+    .byte 6,   $E2, $08    ; B4
+    .byte 12,  $D6, $08    ; C5
+    .byte 6,   $FF, $00    ; Rest
+    .byte 6,   $E2, $08    ; B4
+    .byte 16,  $1D, $09    ; G4
+    .byte 8,   $FF, $00    ; Rest
+    
+    ; Measure 15-16: Syncopation continues
+    .byte 6,   $FE, $08    ; A4
+    .byte 10,  $FF, $00    ; Rest
+    .byte 6,   $FE, $08    ; A4
+    .byte 6,   $D6, $08    ; C5
+    .byte 12,  $BE, $08    ; D5
+    .byte 6,   $FF, $00    ; Rest
+    .byte 6,   $D6, $08    ; C5
+    .byte 16,  $FE, $08    ; A4
+    .byte 12,  $FF, $00    ; Rest - breath
+    
+    ;=========================================================================
+    ; SECTION C - Climax (Higher register, intense)
+    ; Peak energy section
+    ;=========================================================================
+    ; Measure 17-18: Soaring melody
+    .byte 8,   $D6, $08    ; C5
+    .byte 8,   $BE, $08    ; D5
+    .byte 12,  $AA, $08    ; E5 - highest yet!
+    .byte 8,   $BE, $08    ; D5
+    .byte 8,   $D6, $08    ; C5
+    .byte 12,  $BE, $08    ; D5
+    .byte 20,  $AA, $08    ; E5 - hold
+    .byte 8,   $FF, $00    ; Rest
+    
+    ; Measure 19-20: Continue high energy
+    .byte 8,   $AA, $08    ; E5
+    .byte 8,   $AA, $08    ; E5
+    .byte 6,   $8E, $08    ; G5 - peak!
+    .byte 6,   $AA, $08    ; E5
+    .byte 12,  $BE, $08    ; D5
+    .byte 8,   $D6, $08    ; C5
+    .byte 8,   $E2, $08    ; B4
+    .byte 16,  $D6, $08    ; C5 - hold
+    .byte 8,   $FF, $00    ; Rest
+    
+    ; Measure 21-22: Triumphant phrase
+    .byte 6,   $8E, $08    ; G5 - quick
+    .byte 6,   $8E, $08    ; G5
+    .byte 6,   $AA, $08    ; E5
+    .byte 6,   $8E, $08    ; G5
+    .byte 14,  $AA, $08    ; E5
+    .byte 8,   $BE, $08    ; D5
+    .byte 20,  $D6, $08    ; C5
+    .byte 10,  $FF, $00    ; Rest
+    
+    ; Measure 23-24: Descending run back down
+    .byte 6,   $AA, $08    ; E5
+    .byte 6,   $BE, $08    ; D5
+    .byte 6,   $D6, $08    ; C5
+    .byte 6,   $E2, $08    ; B4
+    .byte 6,   $FE, $08    ; A4
+    .byte 6,   $1D, $09    ; G4
+    .byte 8,   $53, $09    ; E4
+    .byte 20,  $1D, $09    ; G4 - landing
+    .byte 12,  $FF, $00    ; Rest - breath
+    
+    ;=========================================================================
+    ; SECTION D - Bridge (Calmer, builds tension)
+    ; Lower register, mysterious feel before final return
+    ;=========================================================================
+    ; Measure 25-26: Mysterious low melody
+    .byte 14,  $53, $09    ; E4 - slower, deliberate
+    .byte 14,  $1D, $09    ; G4
+    .byte 14,  $53, $09    ; E4
+    .byte 20,  $7D, $09    ; D4 - low!
+    .byte 10,  $FF, $00    ; Rest
+    
+    ; Measure 27-28: Tension building
+    .byte 14,  $53, $09    ; E4
+    .byte 14,  $1D, $09    ; G4
+    .byte 14,  $FE, $08    ; A4
+    .byte 20,  $E2, $08    ; B4 - rising
+    .byte 10,  $FF, $00    ; Rest
+    
+    ; Measure 29-30: More tension
+    .byte 10,  $1D, $09    ; G4
+    .byte 10,  $FE, $08    ; A4
+    .byte 10,  $E2, $08    ; B4
+    .byte 10,  $D6, $08    ; C5
+    .byte 10,  $E2, $08    ; B4
+    .byte 10,  $D6, $08    ; C5
+    .byte 14,  $BE, $08    ; D5 - preparing for return
+    .byte 12,  $FF, $00    ; Rest
+    
+    ;=========================================================================
+    ; SECTION A'' - Return of Main Theme (Embellished)
+    ; Familiar melody returns with ornaments
+    ;=========================================================================
+    ; Measure 31-32: Main hook with embellishment
+    .byte 6,   $53, $09    ; E4 - quicker
+    .byte 6,   $1D, $09    ; G4 - grace note
+    .byte 6,   $53, $09    ; E4
+    .byte 8,   $1D, $09    ; G4
+    .byte 8,   $53, $09    ; E4
+    .byte 12,  $FE, $08    ; A4
+    .byte 8,   $1D, $09    ; G4
+    .byte 16,  $53, $09    ; E4 - hold
+    .byte 6,   $FF, $00    ; Rest
+    
+    ; Measure 33-34: Energetic variation
+    .byte 6,   $53, $09    ; E4
     .byte 6,   $53, $09    ; E4
     .byte 6,   $1D, $09    ; G4
-    .byte 12,  $FE, $08    ; A4
-    .byte 6,   $FF, $00    ; Rest
     .byte 6,   $1D, $09    ; G4
-    .byte 16,  $53, $09    ; E4
+    .byte 6,   $FE, $08    ; A4
+    .byte 6,   $FE, $08    ; A4
+    .byte 12,  $E2, $08    ; B4 - peak
+    .byte 8,   $FE, $08    ; A4
+    .byte 16,  $1D, $09    ; G4 - hold
+    .byte 8,   $FF, $00    ; Rest
     
-    ; End marker
+    ;=========================================================================
+    ; SECTION E - Finale (Grand ending before loop)
+    ; Big finish with fanfare-like quality
+    ;=========================================================================
+    ; Measure 35-36: Building to finale
+    .byte 8,   $E2, $08    ; B4
+    .byte 8,   $D6, $08    ; C5
+    .byte 8,   $BE, $08    ; D5
+    .byte 12,  $AA, $08    ; E5
+    .byte 8,   $FF, $00    ; Rest
+    .byte 8,   $AA, $08    ; E5
+    .byte 8,   $BE, $08    ; D5
+    .byte 12,  $D6, $08    ; C5
+    .byte 8,   $FF, $00    ; Rest
+    
+    ; Measure 37-38: Fanfare sequence
+    .byte 6,   $D6, $08    ; C5
+    .byte 6,   $AA, $08    ; E5
+    .byte 6,   $8E, $08    ; G5
+    .byte 14,  $AA, $08    ; E5 - hold
+    .byte 6,   $D6, $08    ; C5
+    .byte 6,   $AA, $08    ; E5
+    .byte 6,   $8E, $08    ; G5
+    .byte 14,  $AA, $08    ; E5 - hold
+    .byte 8,   $FF, $00    ; Rest
+    
+    ; Measure 39-40: Final descent
+    .byte 10,  $8E, $08    ; G5 - high
+    .byte 10,  $AA, $08    ; E5
+    .byte 10,  $D6, $08    ; C5
+    .byte 10,  $E2, $08    ; B4
+    .byte 10,  $FE, $08    ; A4
+    .byte 10,  $1D, $09    ; G4
+    .byte 24,  $53, $09    ; E4 - long final note
+    .byte 16,  $FF, $00    ; Rest before loop
+    
+    ; End marker - triggers loop
     .byte 0, 0, 0
 
 ;-----------------------------------------------------------------------------
@@ -1223,6 +1613,160 @@ gameover_jingle:
     .byte 20,  $FE, $08    ; A4
     .byte 30,  $53, $09    ; E4 - low sad ending
     .byte 0, 0, 0          ; End
+
+;-----------------------------------------------------------------------------
+; Jungle Bass Line (Triangle Channel) - Driving bass rhythm
+; Format: duration (frames), timer_lo, timer_hi (0 = end)
+; Triangle plays one octave lower than pulse for deep bass
+;-----------------------------------------------------------------------------
+; Bass note timer values (low octave for proper bass sound):
+; E2=1358/$54E  F2=1281/$501  G2=1140/$474  A2=1016/$3F8  B2=905/$389
+; C2=1712/$6B0  D2=1524/$5F4
+; Keep bass in E2-B2 range for best sound quality
+
+jungle_bass:
+    ;=========================================================================
+    ; SECTION A - Intro (matches melody sections A + A')
+    ; Driving root notes, E minor foundation
+    ;=========================================================================
+    ; Measures 1-4: E minor groove
+    .byte 16,  $4E, $05    ; E2 - root, half measure
+    .byte 16,  $4E, $05    ; E2
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $4E, $05    ; E2
+    .byte 16,  $4E, $05    ; E2
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $F8, $03    ; A2
+    .byte 16,  $74, $04    ; G2
+    
+    ; Measures 5-8: Building with movement
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $F8, $03    ; A2
+    .byte 16,  $74, $04    ; G2
+    .byte 12,  $89, $03    ; B2
+    .byte 12,  $F8, $03    ; A2
+    .byte 24,  $74, $04    ; G2
+    .byte 12,  $FF, $00    ; Rest
+    
+    ;=========================================================================
+    ; SECTION B - Development (brighter, G major feel)
+    ;=========================================================================
+    ; Measures 9-12: G-based movement (stay in low octave)
+    .byte 20,  $74, $04    ; G2
+    .byte 20,  $F8, $03    ; A2
+    .byte 20,  $89, $03    ; B2
+    .byte 20,  $74, $04    ; G2
+    .byte 20,  $89, $03    ; B2
+    .byte 20,  $74, $04    ; G2
+    .byte 20,  $F8, $03    ; A2
+    .byte 20,  $74, $04    ; G2
+    
+    ; Measures 13-16: Syncopated bass
+    .byte 12,  $74, $04    ; G2 - quick
+    .byte 12,  $FF, $00    ; Rest
+    .byte 12,  $74, $04    ; G2
+    .byte 12,  $89, $03    ; B2
+    .byte 24,  $74, $04    ; G2 - hold
+    .byte 12,  $89, $03    ; B2
+    .byte 24,  $74, $04    ; G2
+    .byte 12,  $FF, $00    ; Rest
+    .byte 12,  $F8, $03    ; A2
+    .byte 12,  $FF, $00    ; Rest
+    .byte 12,  $F8, $03    ; A2
+    .byte 12,  $74, $04    ; G2
+    .byte 24,  $F8, $03    ; A2
+    .byte 12,  $74, $04    ; G2
+    .byte 24,  $F8, $03    ; A2
+    .byte 12,  $FF, $00    ; Rest
+    
+    ;=========================================================================
+    ; SECTION C - Climax (driving, energetic - still low octave)
+    ;=========================================================================
+    ; Measures 17-20: High energy bass (E2-B2 range)
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $F8, $03    ; A2
+    .byte 16,  $4E, $05    ; E2 - back to root
+    .byte 16,  $F8, $03    ; A2
+    .byte 16,  $4E, $05    ; E2
+    .byte 16,  $4E, $05    ; E2
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $4E, $05    ; E2
+    
+    ; Measures 21-24: Driving pattern
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $4E, $05    ; E2
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $89, $03    ; B2
+    .byte 16,  $F8, $03    ; A2
+    .byte 16,  $74, $04    ; G2
+    .byte 24,  $4E, $05    ; E2 - landing on root
+    .byte 16,  $FF, $00    ; Rest
+    
+    ;=========================================================================
+    ; SECTION D - Bridge (mysterious, low)
+    ;=========================================================================
+    ; Measures 25-30: Low sustained notes
+    .byte 32,  $4E, $05    ; E2 - long
+    .byte 32,  $74, $04    ; G2
+    .byte 32,  $4E, $05    ; E2
+    .byte 32,  $F4, $05    ; D2 - low
+    .byte 32,  $4E, $05    ; E2
+    .byte 32,  $74, $04    ; G2
+    .byte 24,  $F8, $03    ; A2
+    .byte 24,  $89, $03    ; B2
+    .byte 24,  $74, $04    ; G2
+    .byte 24,  $F8, $03    ; A2 - rising tension
+    
+    ;=========================================================================
+    ; SECTION A'' + E - Return and Finale
+    ;=========================================================================
+    ; Measures 31-36: Return to main groove
+    .byte 14,  $4E, $05    ; E2
+    .byte 14,  $74, $04    ; G2
+    .byte 14,  $4E, $05    ; E2
+    .byte 14,  $74, $04    ; G2
+    .byte 14,  $F8, $03    ; A2
+    .byte 14,  $74, $04    ; G2
+    .byte 20,  $4E, $05    ; E2
+    .byte 12,  $FF, $00    ; Rest
+    
+    ; Measures 37-40: Finale
+    .byte 16,  $89, $03    ; B2
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $F8, $03    ; A2
+    .byte 16,  $4E, $05    ; E2
+    .byte 16,  $F8, $03    ; A2
+    .byte 16,  $74, $04    ; G2
+    .byte 16,  $89, $03    ; B2
+    .byte 16,  $F8, $03    ; A2
+    .byte 16,  $74, $04    ; G2
+    .byte 32,  $4E, $05    ; E2 - final root
+    .byte 16,  $FF, $00    ; Rest before loop
+    
+    ; End marker
+    .byte 0, 0, 0
+
+;-----------------------------------------------------------------------------
+; Jungle Drum Pattern (Noise Channel) - Disabled
+; The noise channel can sound harsh, so we'll let melody + bass carry the music
+;-----------------------------------------------------------------------------
+
+jungle_drums:
+    ; Just silence - no drums
+    .byte 255, $FF, $00    ; Very long rest
+    .byte 255, $FF, $00    ; Very long rest
+    .byte 255, $FF, $00    ; Very long rest
+    .byte 255, $FF, $00    ; Very long rest
+    .byte 255, $FF, $00    ; Very long rest
+    .byte 255, $FF, $00    ; Very long rest
+    .byte 255, $FF, $00    ; Very long rest
+    .byte 255, $FF, $00    ; Very long rest
+    
+    ; End marker
+    .byte 0, 0, 0
+    ; End marker
+    .byte 0, 0, 0
 
 ;-----------------------------------------------------------------------------
 ; Update Sprites - Write sprite data to OAM buffer
