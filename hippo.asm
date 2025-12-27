@@ -36,6 +36,17 @@ OAMDMA    = $4014     ; OAM DMA register (high byte of RAM address)
 JOYPAD1   = $4016     ; Joypad 1 data port
 JOYPAD2   = $4017     ; Joypad 2 data port
 
+; APU Sound Registers
+APU_PULSE1_CTRL = $4000   ; Pulse 1 duty, volume, envelope
+APU_PULSE1_SWEEP = $4001  ; Pulse 1 sweep control
+APU_PULSE1_LO = $4002     ; Pulse 1 timer low
+APU_PULSE1_HI = $4003     ; Pulse 1 timer high, length counter
+APU_PULSE2_CTRL = $4004   ; Pulse 2 duty, volume, envelope
+APU_PULSE2_SWEEP = $4005  ; Pulse 2 sweep control
+APU_PULSE2_LO = $4006     ; Pulse 2 timer low
+APU_PULSE2_HI = $4007     ; Pulse 2 timer high, length counter
+APU_STATUS = $4015        ; APU status (enable channels)
+
 ;=============================================================================
 ; Game Constants
 ;=============================================================================
@@ -116,6 +127,16 @@ last_lane:      .res 1    ; Last lane a dollar spawned in (to avoid repetition)
 rng_seed:       .res 1    ; Simple RNG seed
 spawn_timer:    .res 1    ; Frames until next dollar spawn
 
+; Sound effect state
+sfx_timer:      .res 1    ; Frames remaining for current sound effect
+sfx_type:       .res 1    ; 0=none, 1=collect, 2=jump
+
+; Music state
+music_ptr:      .res 2    ; Pointer to current position in music data
+music_timer:    .res 1    ; Frames until next note
+music_playing:  .res 1    ; 0=stopped, 1=playing
+music_loop:     .res 1    ; 0=play once, 1=loop
+
 ;=============================================================================
 ; OAM Buffer (Sprite RAM - must be at $0200)
 ;=============================================================================
@@ -169,6 +190,13 @@ reset:
     inx
     bne @clear_oam
 
+    ; Initialize APU - enable pulse channels 1 and 2
+    lda #$03              ; Enable pulse 1 and pulse 2
+    sta APU_STATUS
+    lda #$00
+    sta sfx_timer         ; No sound playing initially
+    sta music_playing     ; Music not playing yet
+
     ; Wait for second VBlank (PPU is ready after this)
 @vblank_wait2:
     bit PPUSTATUS
@@ -183,6 +211,9 @@ reset:
 
     ; Load title screen
     jsr load_title_screen
+    
+    ; Start title jingle
+    jsr start_title_jingle
 
     ; Enable NMI and set pattern tables
     lda #%10010000        ; NMI on, sprites from pattern table 0, BG from pattern table 1
@@ -214,6 +245,8 @@ main_loop:
     jmp @game_over
 
 @title_screen:
+    ; Update title jingle
+    jsr update_music
     ; Check for START button to begin
     lda buttons_new
     and #BTN_START
@@ -225,6 +258,8 @@ main_loop:
     jsr load_background
     ; Initialize game
     jsr init_game
+    ; Start background music
+    jsr start_music
     ; Set game state to playing
     lda #$01
     sta game_state
@@ -239,12 +274,16 @@ main_loop:
     jsr update_scroll
     jsr update_obstacles
     jsr check_collisions
+    jsr update_sound
+    jsr update_music
     jsr update_sprites
     jmp @loop_end
 
 @game_over:
     ; Draw game over screen using sprites
     jsr draw_game_over
+    ; Update game over jingle
+    jsr update_music
     
     ; Check for START to restart
     lda buttons_new
@@ -255,6 +294,7 @@ main_loop:
     sta PPUMASK           ; Disable rendering
     jsr load_background   ; Reload game background
     jsr init_game         ; Reinitialize game
+    jsr start_music       ; Restart background music
     lda #$01
     sta game_state        ; Set to playing
     lda #%00011110
@@ -436,6 +476,8 @@ update_timer:
 @no_new_hiscore:
     lda #$02
     sta game_state
+    jsr stop_music        ; Stop background music
+    jsr start_gameover_jingle  ; Play game over jingle
     
 @timer_done:
     rts
@@ -494,6 +536,7 @@ update_hippo:
     sta hippo_land_y      ; Remember where to land
     lda #<(-JUMP_VELOCITY)
     sta hippo_vel_y       ; Negative velocity = going up
+    jsr play_jump_sound   ; Play jump sound effect
     jmp @apply_gravity
 
 @no_jump:
@@ -820,6 +863,9 @@ check_collisions:
     lda #$00
     sta dollar_active, x
 
+    ; Play collect sound
+    jsr play_collect_sound
+
     ; Add to score
     lda score_lo
     clc
@@ -865,6 +911,318 @@ check_collisions:
 
 @collision_done:
     rts
+
+;-----------------------------------------------------------------------------
+; Sound Effect Routines
+;-----------------------------------------------------------------------------
+
+; Play the collect dollar sound - a cheerful two-note sparkle
+play_collect_sound:
+    ; Set up pulse 1 for a nice bell-like tone
+    ; Duty 50% for smooth tone, constant volume, volume = 10
+    lda #%10101010        ; Duty 50% (10), disable length counter (1), constant volume (0), volume 10
+    sta APU_PULSE1_CTRL
+    
+    ; Disable sweep
+    lda #$00
+    sta APU_PULSE1_SWEEP
+    
+    ; First note: G5 (~784 Hz)
+    ; Timer = 1789773 / (16 * 784) - 1 = 142 = $8E
+    lda #$8E              ; Timer low
+    sta APU_PULSE1_LO
+    lda #$08              ; Timer high (0) + length counter load
+    sta APU_PULSE1_HI
+    
+    ; Mark this as collect sound, set timer for first note (4 frames)
+    lda #1
+    sta sfx_type
+    lda #4
+    sta sfx_timer
+    rts
+
+; Play the jump sound - a quick rising "boing" effect
+play_jump_sound:
+    ; Set up pulse 1 for a bouncy jump sound
+    ; Duty 25%, constant volume, volume = 10
+    lda #%01001010        ; Duty 25% (01), disable length counter (0), constant volume (0), volume 10
+    sta APU_PULSE1_CTRL
+    
+    ; Enable upward sweep for rising pitch effect
+    ; Sweep enabled, period=2, negate (pitch rises), shift=3
+    lda #%10101011        ; Enable (1), period 2 (010), negate (1), shift 3 (011)
+    sta APU_PULSE1_SWEEP
+    
+    ; Set starting frequency for a lower tone (~330 Hz, E4)
+    ; Timer = 1789773 / (16 * 330) - 1 = 338 = $152
+    lda #$52              ; Timer low
+    sta APU_PULSE1_LO
+    lda #$09              ; Timer high ($01) + length counter load
+    sta APU_PULSE1_HI
+    
+    ; Set sound timer for duration (8 frames)
+    lda #2
+    sta sfx_type
+    lda #8
+    sta sfx_timer
+    rts
+
+; Update sound effects (called each frame)
+update_sound:
+    lda sfx_timer
+    beq @sound_done       ; No sound playing
+    
+    dec sfx_timer
+    bne @sound_done       ; Still playing current phase
+    
+    ; Timer hit zero - check if we need second note (collect sound)
+    lda sfx_type
+    cmp #1
+    bne @silence_sound    ; Not collect sound, just silence
+    
+    ; Play second note of collect arpeggio: C6 (~1047 Hz)
+    ; Timer = 1789773 / (16 * 1047) - 1 = 106 = $6A
+    lda #$6A              ; Timer low
+    sta APU_PULSE1_LO
+    lda #$08              ; Timer high + length counter load
+    sta APU_PULSE1_HI
+    
+    ; Set timer for second note, clear type so we silence after
+    lda #5
+    sta sfx_timer
+    lda #0
+    sta sfx_type
+    rts
+    
+@silence_sound:
+    ; Sound finished - silence the channel
+    lda #%00110000        ; Duty 00, constant volume, volume = 0 (silent)
+    sta APU_PULSE1_CTRL
+    lda #0
+    sta sfx_type
+    
+@sound_done:
+    rts
+
+;-----------------------------------------------------------------------------
+; Music Engine - Background music on Pulse Channel 2
+;-----------------------------------------------------------------------------
+
+; Start playing the jungle theme (loops)
+start_music:
+    lda #<jungle_melody
+    sta music_ptr
+    lda #>jungle_melody
+    sta music_ptr+1
+    lda #1
+    sta music_timer       ; Start immediately
+    sta music_playing
+    sta music_loop        ; Enable looping
+    
+    ; Set up pulse 2 for music - 50% duty, volume 3
+    lda #%10110011        ; Duty 50% (10), halt (1), const vol (1), vol=3
+    sta APU_PULSE2_CTRL
+    lda #$00
+    sta APU_PULSE2_SWEEP  ; No sweep
+    rts
+
+; Start title screen jingle (plays once)
+start_title_jingle:
+    lda #<title_jingle
+    sta music_ptr
+    lda #>title_jingle
+    sta music_ptr+1
+    lda #1
+    sta music_timer
+    lda #1
+    sta music_playing
+    lda #0
+    sta music_loop        ; Don't loop
+    
+    ; Set up pulse 2 - brighter sound for title, volume 5
+    lda #%01110101        ; Duty 25% (01), halt (1), const vol (1), vol=5
+    sta APU_PULSE2_CTRL
+    lda #$00
+    sta APU_PULSE2_SWEEP
+    rts
+
+; Start game over jingle (plays once)
+start_gameover_jingle:
+    lda #<gameover_jingle
+    sta music_ptr
+    lda #>gameover_jingle
+    sta music_ptr+1
+    lda #1
+    sta music_timer
+    lda #1
+    sta music_playing
+    lda #0
+    sta music_loop        ; Don't loop
+    
+    ; Set up pulse 2 - sadder tone, volume 4
+    lda #%10110100        ; Duty 50% (10), halt (1), const vol (1), vol=4
+    sta APU_PULSE2_CTRL
+    lda #$00
+    sta APU_PULSE2_SWEEP
+    rts
+
+; Stop music
+stop_music:
+    lda #$00
+    sta music_playing
+    lda #%00110000        ; Silence channel
+    sta APU_PULSE2_CTRL
+    rts
+
+; Update music (called each frame)
+update_music:
+    lda music_playing
+    beq @music_done       ; Music not playing
+    
+    dec music_timer
+    bne @music_done       ; Not time for next note yet
+    
+    ; Time for next note - read from music data
+    ldy #0
+    lda (music_ptr), y    ; Get note duration
+    beq @loop_music       ; 0 = end of song, loop
+    sta music_timer       ; Set duration
+    
+    iny
+    lda (music_ptr), y    ; Get note pitch (timer low)
+    cmp #$FF              ; $FF = rest
+    beq @play_rest
+    sta APU_PULSE2_LO
+    
+    iny  
+    lda (music_ptr), y    ; Get timer high
+    sta APU_PULSE2_HI
+    
+    ; Re-enable sound (in case we were resting)
+    lda #%10110011        ; Duty 50% (10), halt (1), const vol (1), vol=3
+    sta APU_PULSE2_CTRL
+    jmp @advance_ptr
+    
+@play_rest:
+    ; Silence for rest
+    lda #%00110000
+    sta APU_PULSE2_CTRL
+    
+@advance_ptr:
+    ; Advance pointer by 3 bytes (duration, pitch_lo, pitch_hi)
+    lda music_ptr
+    clc
+    adc #3
+    sta music_ptr
+    bcc @music_done
+    inc music_ptr+1
+    
+@music_done:
+    rts
+    
+@loop_music:
+    ; Check if we should loop
+    lda music_loop
+    beq @end_jingle       ; Don't loop - just stop
+    
+    ; Reset to beginning of song
+    lda #<jungle_melody
+    sta music_ptr
+    lda #>jungle_melody
+    sta music_ptr+1
+    lda #1
+    sta music_timer
+    rts
+    
+@end_jingle:
+    ; Jingle finished - stop playing
+    lda #0
+    sta music_playing
+    lda #%00110000        ; Silence channel
+    sta APU_PULSE2_CTRL
+    rts
+
+;-----------------------------------------------------------------------------
+; Jungle Action Melody Data
+; Format: duration (frames), timer_lo, timer_hi (0 = end)
+; Timer values: lower = higher pitch
+;-----------------------------------------------------------------------------
+; Note timer values (approximate):
+; C4=428/$1AC  D4=381/$17D  E4=339/$153  F4=320/$140  G4=285/$11D
+; A4=254/$0FE  B4=226/$0E2  C5=214/$0D6  D5=190/$0BE  E5=170/$0AA
+; F5=160/$0A0  G5=142/$08E  A5=127/$07F  B5=113/$071  C6=107/$06B
+
+jungle_melody:
+    ; Intro riff - driving jungle beat (E minor pentatonic)
+    .byte 8,   $53, $09    ; E4 - quick
+    .byte 8,   $53, $09    ; E4
+    .byte 8,   $1D, $09    ; G4
+    .byte 8,   $53, $09    ; E4
+    .byte 12,  $FE, $08    ; A4 - slightly longer
+    .byte 8,   $1D, $09    ; G4
+    .byte 16,  $53, $09    ; E4 - hold
+    
+    ; Second phrase - climb up
+    .byte 8,   $1D, $09    ; G4
+    .byte 8,   $1D, $09    ; G4  
+    .byte 8,   $FE, $08    ; A4
+    .byte 8,   $1D, $09    ; G4
+    .byte 12,  $E2, $08    ; B4
+    .byte 8,   $FE, $08    ; A4
+    .byte 16,  $1D, $09    ; G4 - hold
+    
+    ; Third phrase - higher energy
+    .byte 6,   $E2, $08    ; B4 - faster
+    .byte 6,   $E2, $08    ; B4
+    .byte 6,   $D6, $08    ; C5
+    .byte 6,   $E2, $08    ; B4
+    .byte 10,  $FE, $08    ; A4
+    .byte 10,  $1D, $09    ; G4
+    .byte 20,  $53, $09    ; E4 - long hold
+    
+    ; Rest before loop
+    .byte 12,  $FF, $00    ; Rest
+    
+    ; Syncopated rhythm section
+    .byte 6,   $53, $09    ; E4
+    .byte 10,  $FF, $00    ; Rest  
+    .byte 6,   $53, $09    ; E4
+    .byte 6,   $1D, $09    ; G4
+    .byte 12,  $FE, $08    ; A4
+    .byte 6,   $FF, $00    ; Rest
+    .byte 6,   $1D, $09    ; G4
+    .byte 16,  $53, $09    ; E4
+    
+    ; End marker
+    .byte 0, 0, 0
+
+;-----------------------------------------------------------------------------
+; Title Screen Jingle - Welcoming, adventurous fanfare
+;-----------------------------------------------------------------------------
+title_jingle:
+    ; Uplifting C major arpeggio fanfare
+    .byte 10,  $D6, $08    ; C5
+    .byte 10,  $AA, $08    ; E5
+    .byte 10,  $8E, $08    ; G5
+    .byte 20,  $6B, $08    ; C6 - hold high note
+    .byte 8,   $FF, $00    ; Rest
+    .byte 8,   $8E, $08    ; G5
+    .byte 8,   $6B, $08    ; C6
+    .byte 25,  $AA, $08    ; E5 - resolve
+    .byte 0, 0, 0          ; End
+
+;-----------------------------------------------------------------------------
+; Game Over Jingle - Descending, melancholy
+;-----------------------------------------------------------------------------
+gameover_jingle:
+    ; Descending minor phrase
+    .byte 15,  $8E, $08    ; G5
+    .byte 15,  $AA, $08    ; E5 (but feels minor in context)
+    .byte 15,  $D6, $08    ; C5
+    .byte 10,  $FF, $00    ; Rest
+    .byte 20,  $FE, $08    ; A4
+    .byte 30,  $53, $09    ; E4 - low sad ending
+    .byte 0, 0, 0          ; End
 
 ;-----------------------------------------------------------------------------
 ; Update Sprites - Write sprite data to OAM buffer
